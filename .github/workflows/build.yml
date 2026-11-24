@@ -1,0 +1,102 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Compile Stockfish for iOS arm64
+        run: |
+          git clone --depth 1 https://github.com/official-stockfish/Stockfish.git /tmp/sf
+          cd /tmp/sf/src
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          make build ARCH=arm64 COMP=clang \
+            CXX="xcrun --sdk iphoneos clang++" \
+            CXXFLAGS="-target arm64-apple-ios16.0 -isysroot $SDK -O3" \
+            LDFLAGS="-target arm64-apple-ios16.0 -isysroot $SDK"
+          chmod +x stockfish
+          cp stockfish $GITHUB_WORKSPACE/ChessOverlay/Engine/stockfish
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Write project.yml
+        run: |
+          cat > $GITHUB_WORKSPACE/project.yml << 'EOF'
+          name: ChessOverlay
+          options:
+            bundleIdPrefix: com.chessoverlay
+            deploymentTarget:
+              iOS: "16.0"
+            xcodeVersion: "15.4"
+          settings:
+            SWIFT_VERSION: "5.9"
+            IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+            ENABLE_BITCODE: "NO"
+            CODE_SIGNING_REQUIRED: "NO"
+            CODE_SIGNING_ALLOWED: "NO"
+            AD_HOC_CODE_SIGNING_ALLOWED: "YES"
+          targets:
+            ChessOverlay:
+              type: application
+              platform: iOS
+              sources:
+                - path: ChessOverlay
+                  excludes:
+                    - "**/*.md"
+              info:
+                path: ChessOverlay/Info.plist
+              resources:
+                - path: ChessOverlay/Engine/stockfish
+                  buildPhase: resources
+              settings:
+                PRODUCT_BUNDLE_IDENTIFIER: com.chessoverlay.app
+                ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+                TARGETED_DEVICE_FAMILY: "1"
+                SUPPORTS_MACCATALYST: "NO"
+          EOF
+
+      - name: Generate Xcode project
+        run: |
+          cd $GITHUB_WORKSPACE
+          xcodegen generate
+
+      - name: Build archive
+        run: |
+          cd $GITHUB_WORKSPACE
+          xcodebuild \
+            -project ChessOverlay.xcodeproj \
+            -scheme ChessOverlay \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive \
+            -archivePath $GITHUB_WORKSPACE/build/ChessOverlay.xcarchive \
+            | xcpretty || true
+
+      - name: Package IPA
+        run: |
+          cd $GITHUB_WORKSPACE/build/ChessOverlay.xcarchive/Products/Applications
+          mkdir -p Payload
+          cp -r ChessOverlay.app Payload/
+          zip -r $GITHUB_WORKSPACE/build/ChessOverlay.ipa Payload/
+          echo "IPA size: $(du -sh $GITHUB_WORKSPACE/build/ChessOverlay.ipa | cut -f1)"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChessOverlay-IPA
+          path: build/ChessOverlay.ipa
+          retention-days: 30
